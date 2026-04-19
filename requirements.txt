@@ -1,0 +1,5 @@
+fpdf
+matplotlib
+mysql-connector-python
+python-dotenv
+
