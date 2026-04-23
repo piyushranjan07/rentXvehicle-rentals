@@ -23,25 +23,25 @@ def admin_login():
         return False
 
     # Send OTP
-    # otp = send_otp(email)
+    otp = send_otp(email)
 
-    # attempts = 3
+    attempts = 3
 
-    # while attempts > 0:
-    #     user_otp = input("Enter OTP: ")
+    while attempts > 0:
+        user_otp = input("Enter OTP: ")
 
-    #     if otp == user_otp:
-    #         print("Admin Login Successful")
-    #         cursor.close()
-    #         conn.close()
-    #         return True
-    #     else:
-    #         attempts -= 1
-    #         print(f"Incorrect OTP.")
+        if otp == user_otp:
+            print("Admin Login Successful")
+            cursor.close()
+            conn.close()
+            return True
+        else:
+            attempts -= 1
+            print(f"Incorrect OTP.")
 
-    # print("Incorrect OTP. Login failed.")
+    print("Incorrect OTP. Login failed.")
 
     cursor.close()
     conn.close()
-    # return False
-    return True
+    return False
+    # return True

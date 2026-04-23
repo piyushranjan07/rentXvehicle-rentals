@@ -203,79 +203,127 @@ def vehicle_wise_revenue():
         return
     cursor = conn.cursor()
 
-    cursor.execute("SELECT vehicle_id, type, model FROM vehicles")
-    vehicles = cursor.fetchall()
+    # ── fetch all distinct vehicle types ──
+    cursor.execute("SELECT DISTINCT type FROM vehicles ORDER BY type")
+    types = [row[0] for row in cursor.fetchall()]
 
-    if not vehicles:
+    if not types:
         print("No vehicles found.")
         cursor.close()
         conn.close()
         return
 
-    labels, totals = [], []
+    # ── build shared date condition (appended to every query) ──
+    date_params = []
+    date_cond   = ""
+    if start_date:
+        col_fmt   = "DATE_FORMAT(confirmation_time,'%Y-%m')" if len(start_date) == 7 else "DATE(confirmation_time)"
+        date_cond += f" AND {col_fmt} >= %s"
+        date_params.append(start_date)
+    if end_date:
+        col_fmt   = "DATE_FORMAT(confirmation_time,'%Y-%m')" if len(end_date) == 7 else "DATE(confirmation_time)"
+        date_cond += f" AND {col_fmt} <= %s"
+        date_params.append(end_date)
+
+    # ── collect (vehicle_id, model, booking_count, total_revenue) per type ──
+    type_data = {}   # { vtype: [(vid, model, bookings, revenue), ...] }
+
+    cursor.execute("SELECT vehicle_id, type, model FROM vehicles ORDER BY type, vehicle_id")
+    vehicles = cursor.fetchall()
 
     for vid, vtype, model in vehicles:
-        query_b = "SELECT COALESCE(SUM(total_amount), 0) FROM bookings WHERE vehicle_id=%s AND status='Booked' AND confirmation_time IS NOT NULL"
-        query_h = "SELECT COALESCE(SUM(total_amount), 0) FROM user_history WHERE vehicle_id=%s AND status='Completed' AND confirmation_time IS NOT NULL"
-        
-        params = [vid]
-        
-        # Determine the correct format for the date condition
-        if start_date:
-            col_format = "DATE_FORMAT(confirmation_time, '%Y-%m')" if len(start_date) == 7 else "DATE(confirmation_time)"
-            query_b += f" AND {col_format} >= %s"
-            query_h += f" AND {col_format} >= %s"
-            params.append(start_date)
-            
-        if end_date:
-            col_format = "DATE_FORMAT(confirmation_time, '%Y-%m')" if len(end_date) == 7 else "DATE(confirmation_time)"
-            query_b += f" AND {col_format} <= %s"
-            query_h += f" AND {col_format} <= %s"
-            params.append(end_date)
+        p = [vid] + date_params
 
-        cursor.execute(query_b, tuple(params))
-        active_rev = float(cursor.fetchone()[0])
+        cursor.execute(
+            f"SELECT COUNT(*) FROM bookings "
+            f"WHERE vehicle_id=%s AND status='Booked' AND confirmation_time IS NOT NULL{date_cond}",
+            tuple(p)
+        )
+        cnt_b = cursor.fetchone()[0]
 
-        cursor.execute(query_h, tuple(params))
-        hist_rev = float(cursor.fetchone()[0])
+        cursor.execute(
+            f"SELECT COUNT(*) FROM user_history "
+            f"WHERE vehicle_id=%s AND status='Completed' AND confirmation_time IS NOT NULL{date_cond}",
+            tuple(p)
+        )
+        cnt_h = cursor.fetchone()[0]
 
-        total = active_rev + hist_rev
-        if total > 0:                          # skip zero-revenue vehicles
-            labels.append(f"{model}\n({vtype})")
-            totals.append(total)
+        cursor.execute(
+            f"SELECT COALESCE(SUM(total_amount),0) FROM bookings "
+            f"WHERE vehicle_id=%s AND status='Booked' AND confirmation_time IS NOT NULL{date_cond}",
+            tuple(p)
+        )
+        rev_b = float(cursor.fetchone()[0])
+
+        cursor.execute(
+            f"SELECT COALESCE(SUM(total_amount),0) FROM user_history "
+            f"WHERE vehicle_id=%s AND status='Completed' AND confirmation_time IS NOT NULL{date_cond}",
+            tuple(p)
+        )
+        rev_h = float(cursor.fetchone()[0])
+
+        bookings = cnt_b + cnt_h
+        revenue  = rev_b + rev_h
+
+        # include vehicle even if only bookings or only revenue is non-zero
+        if bookings > 0 or revenue > 0:
+            type_data.setdefault(vtype, []).append((vid, model, bookings, revenue))
 
     cursor.close()
     conn.close()
 
-    if not labels:
-        print("No vehicle revenue data found for this range.")
+    active_types = [t for t in types if t in type_data]
+
+    if not active_types:
+        print("No vehicle data found for this range.")
         return
 
-    # Sort descending
-    paired  = sorted(zip(totals, labels), reverse=True)
-    totals  = [p[0] for p in paired]
-    labels  = [p[1] for p in paired]
+    # ── one FIGURE per vehicle type (all open simultaneously) ──
+    type_cmaps = ["cool", "autumn", "summer", "winter", "spring", "plasma"]
 
-    # Colour gradient
-    cmap   = plt.colormaps["cool"].resampled(len(labels))
-    colors = [cmap(i) for i in range(len(labels))]
+    for t_idx, vtype in enumerate(active_types):
+        # sort by number of bookings (descending)
+        entries  = sorted(type_data[vtype], key=lambda x: x[2], reverse=True)
+        x_labels = [f"ID:{e[0]}\n{e[1]}" for e in entries]
+        bookings = [e[2] for e in entries]
+        revenues = [e[3] for e in entries]
 
-    fig, ax = plt.subplots(figsize=(max(10, len(labels) * 1.4), 6))
-    bars = ax.bar(labels, totals, color=colors, width=0.6, zorder=3)
+        cmap   = plt.colormaps[type_cmaps[t_idx % len(type_cmaps)]].resampled(max(len(x_labels), 2))
+        colors = [cmap(i) for i in range(len(x_labels))]
 
-    for bar, val in zip(bars, totals):
-        ax.text(
-            bar.get_x() + bar.get_width() / 2,
-            bar.get_height() + max(totals) * 0.01,
-            f"₹{int(val):,}",
-            ha="center", va="bottom", color=TEXT, fontsize=8
-        )
+        fig_w = max(10, len(x_labels) * 2.2)
+        fig, ax = plt.subplots(figsize=(fig_w, 6))
+        fig.patch.set_facecolor(BG)
 
-    ax.set_xlabel("Vehicle (Type)", labelpad=8)
-    ax.set_ylabel("Revenue (₹)", labelpad=8)
-    _apply_dark_style(fig, ax, "Vehicle-wise Revenue")
-    plt.tight_layout()
-    plt.show()
+        bars  = ax.bar(x_labels, bookings, color=colors, width=0.55, zorder=3)
+        max_b = max(bookings) if max(bookings) > 0 else 1
+
+        for bar, cnt, rev in zip(bars, bookings, revenues):
+            bx  = bar.get_x() + bar.get_width() / 2
+            bh  = bar.get_height()
+
+            # ── booking count: just above the bar ──
+            ax.text(bx, bh + max_b * 0.018,
+                    str(cnt),
+                    ha="center", va="bottom",
+                    color=TEXT, fontsize=10, fontweight="bold")
+
+            # ── total revenue: centred inside the bar rectangle ──
+            if bh > 0:
+                ax.text(bx, bh / 2,
+                        f"₹{int(rev):,}",
+                        ha="center", va="center",
+                        color="white", fontsize=8, fontweight="bold",
+                        rotation=90)
+
+        ax.set_xlabel("Vehicle ID / Model", labelpad=8)
+        ax.set_ylabel("Number of Bookings", labelpad=8)
+        _apply_dark_style(fig, ax, f"{vtype}  —  No. of Bookings")
+        ax.yaxis.set_major_formatter(mticker.FuncFormatter(lambda x, _: f"{int(x)}"))
+        plt.setp(ax.get_xticklabels(), rotation=30, ha="right")
+        plt.tight_layout()
+
+    plt.show()      # open ALL figures at once
 
 
 # ── Menu ──────
@@ -284,7 +332,7 @@ def visualise_menu():
         print("\n---- VISUALISE DATA ----")
         print("1. Revenue by Day")
         print("2. Revenue by Month")
-        # print("3. Vehicle-wise Revenue")
+        print("3. Vehicle-wise Revenue")
         print("4. Back")
 
         choice = input("Enter choice: ").strip()
@@ -294,9 +342,9 @@ def visualise_menu():
                 revenue_by_day()
             case "2":
                 revenue_by_month()
-            # case "3":
-            #     vehicle_wise_revenue()
             case "3":
+                vehicle_wise_revenue()
+            case "4":
                 break
             case _:
                 print("Invalid choice. Please enter 1-4.")
